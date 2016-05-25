@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -613,6 +614,8 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 	}{p, me})
 }
 
+var uploadM sync.Mutex
+
 func postIndex(w http.ResponseWriter, r *http.Request) {
 	me := getSessionUser(r)
 	if !isLogin(me) {
@@ -620,6 +623,9 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uploadM.Lock()
+	defer uploadM.Unlock()
+	r.ParseMultipartForm(1 << 10)
 	if r.FormValue("csrf_token") != getCSRFToken(r) {
 		w.WriteHeader(StatusUnprocessableEntity)
 		return
