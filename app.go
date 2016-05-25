@@ -2,6 +2,7 @@ package main
 
 import (
 	crand "crypto/rand"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"html/template"
@@ -12,7 +13,6 @@ import (
 	_ "net/http/pprof"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"regexp"
 	"strconv"
@@ -125,14 +125,7 @@ func escapeshellarg(arg string) string {
 }
 
 func digest(src string) string {
-	// opensslのバージョンによっては (stdin)= というのがつくので取る
-	out, err := exec.Command("/bin/bash", "-c", `printf "%s" `+escapeshellarg(src)+` | openssl dgst -sha512 | sed 's/^.*= //'`).Output()
-	if err != nil {
-		fmt.Println(err)
-		return ""
-	}
-
-	return strings.TrimSuffix(string(out), "\n")
+	return fmt.Sprintf("%x", sha512.Sum512([]byte(src)))
 }
 
 func calculateSalt(accountName string) string {
@@ -394,7 +387,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT 20")
+	err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` INNER JOIN `users` ON posts.user_id=users.id WHERE users.del_flg = 0 ORDER BY `created_at` DESC LIMIT 20")
 	if err != nil {
 		fmt.Println(err)
 		return
