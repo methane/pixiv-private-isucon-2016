@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/exec"
@@ -825,6 +826,8 @@ func main() {
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(8)
 	defer db.Close()
+
+	go http.ListenAndServe(":3000", nil)
 
 	goji.Get("/initialize", getInitialize)
 	goji.Get("/login", getLogin)
