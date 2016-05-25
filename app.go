@@ -621,6 +621,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 
 	mime := ""
 	if file != nil {
+		defer file.Close()
 		// 投稿のContent-Typeからファイルのタイプを決定する
 		contentType := header.Header["Content-Type"][0]
 		if strings.Contains(contentType, "jpeg") {
