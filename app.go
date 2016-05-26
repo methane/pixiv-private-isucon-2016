@@ -80,26 +80,21 @@ func init() {
 }
 
 func writeImage(id int, mime string, data []byte) {
-	var ext string
-	switch mime {
-	case "image/jpeg":
-		ext = ".jpg"
-	case "image/png":
-		ext = ".png"
-	case "image/gif":
-		ext = ".gif"
-	default:
-		fmt.Println("Failed to write file: ", id, mime)
-		return
-	}
-
-	fn := fmt.Sprintf("../public/image/%d%s", id, ext)
-	f, err := os.OpenFile(fn, os.O_WRONLY|os.O_CREATE, 0666)
+	fn := imagePath(id, mime)
+	err := ioutil.WriteFile(fn, data, 0666)
 	if err != nil {
-		panic(err)
+		log.Println("failed to write file; path=%q, err=%v", fn, err)
 	}
-	f.Write(data)
-	f.Close()
+}
+
+func copyImage(id int, src, mime string) {
+	dst := imagePath(id, mime)
+	if err := os.Chmod(src, 0666); err != nil {
+		log.Println("failed to chmod: path=%v, %v", src, err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		log.Println("failed to rename; src=%q, dst=%q; %v", src, dst, err)
+	}
 }
 
 func dbInitialize() {
@@ -258,6 +253,19 @@ func imageURL(p Post) string {
 	}
 
 	return "/image/" + strconv.Itoa(p.ID) + ext
+}
+
+func imagePath(id int, mime string) string {
+	var ext string
+	switch mime {
+	case "image/jpeg":
+		ext = ".jpg"
+	case "image/png":
+		ext = ".png"
+	case "image/gif":
+		ext = ".gif"
+	}
+	return fmt.Sprintf("../public/image/%d%s", id, ext)
 }
 
 func isLogin(u User) bool {
@@ -662,16 +670,20 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filedata, rerr := ioutil.ReadAll(file)
-	if rerr != nil {
-		fmt.Println(rerr.Error())
+	tf, err := ioutil.TempFile("../upload", "img-")
+	if err != nil {
+		log.Panicf("failed to create image: %v", err)
 	}
-
-	if len(filedata) > UploadLimit {
+	written, err := io.CopyN(tf, file, UploadLimit+1)
+	if err != nil && err != io.EOF {
+		log.Panicf("failed to write to temporary file: %v", err)
+	}
+	if written > UploadLimit {
+		os.Remove(tf.Name())
+		tf.Close()
 		session := getSession(r)
 		session.Values["notice"] = "ファイルサイズが大きすぎます"
 		session.Save(r, w)
-
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
@@ -694,7 +706,8 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(lerr.Error())
 		return
 	}
-	writeImage(int(pid), mime, filedata)
+	tf.Close()
+	copyImage(int(pid), tf.Name(), mime)
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 	return
 }
