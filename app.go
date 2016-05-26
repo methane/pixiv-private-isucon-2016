@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	crand "crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
@@ -109,6 +110,8 @@ func dbInitialize() {
 	for _, sql := range sqls {
 		db.Exec(sql)
 	}
+
+	renderIndexPosts()
 }
 
 func tryLogin(accountName, password string) *User {
@@ -134,13 +137,6 @@ func validateUser(accountName, password string) bool {
 	}
 
 	return true
-}
-
-// 今回のGo実装では言語側のエスケープの仕組みが使えないのでOSコマンドインジェクション対策できない
-// 取り急ぎPHPのescapeshellarg関数を参考に自前で実装
-// cf: http://jp2.php.net/manual/ja/function.escapeshellarg.php
-func escapeshellarg(arg string) string {
-	return "'" + strings.Replace(arg, "'", "'\\''", -1) + "'"
 }
 
 func digest(src string) string {
@@ -414,38 +410,85 @@ func getLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func getIndex(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
+var (
+	indexTemplate *template.Template
+	postsTemplate *template.Template
 
-	results := []Post{}
+	indexPostsM         sync.Mutex
+	indexPostsT         time.Time
+	indexPostsRenderedM sync.RWMutex
+	indexPostsRendered  []byte
+)
 
-	err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` INNER JOIN `users` ON posts.user_id=users.id WHERE users.del_flg = 0 ORDER BY `created_at` DESC LIMIT 20")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	posts, merr := makePosts(results, getCSRFToken(r), false)
-	if merr != nil {
-		fmt.Println(merr)
-		return
-	}
-
+func init() {
 	fmap := template.FuncMap{
 		"imageURL": imageURL,
 	}
 
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+	indexTemplate = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
 		getTemplPath("layout.html"),
 		getTemplPath("index.html"),
+	))
+
+	postsTemplate = template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
 		getTemplPath("posts.html"),
 		getTemplPath("post.html"),
-	)).Execute(w, struct {
-		Posts     []Post
-		Me        User
-		CSRFToken string
-		Flash     string
-	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
+	))
+}
+
+func renderIndexPosts() {
+	now := time.Now()
+	indexPostsM.Lock()
+	defer indexPostsM.Unlock()
+	if indexPostsT.After(now) {
+		return
+	}
+	now = time.Now()
+
+	results := []Post{}
+	err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` INNER JOIN `users` ON posts.user_id=users.id WHERE users.del_flg = 0 ORDER BY `created_at` DESC LIMIT 20")
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	posts, merr := makePosts(results, "[[[CSRFTOKEN]]]", false)
+	if merr != nil {
+		log.Println(merr)
+		return
+	}
+
+	var b bytes.Buffer
+	if err := postsTemplate.Execute(&b, posts); err != nil {
+		log.Println(err)
+		return
+	}
+
+	indexPostsT = now
+	indexPostsRenderedM.Lock()
+	indexPostsRendered = b.Bytes()
+	indexPostsRenderedM.Unlock()
+}
+
+func getIndexPosts(csrf string) template.HTML {
+	indexPostsRenderedM.RLock()
+	t := bytes.Replace(indexPostsRendered, []byte("[[[CSRFTOKEN]]]"), []byte(csrf), -1)
+	indexPostsRenderedM.RUnlock()
+	return template.HTML(string(t))
+}
+
+func getIndex(w http.ResponseWriter, r *http.Request) {
+	me := getSessionUser(r)
+	csrf := getCSRFToken(r)
+	posts := getIndexPosts(csrf)
+
+	indexTemplate.Execute(w,
+		map[string]interface{}{
+			"Me":        me,
+			"CSRFToken": csrf,
+			"Flash":     getFlash(w, r, "notice"),
+			"Posts":     posts},
+	)
 }
 
 func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
@@ -708,8 +751,9 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	tf.Close()
 	copyImage(int(pid), tf.Name(), mime)
+
+	renderIndexPosts()
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
-	return
 }
 
 func getImage(c web.C, w http.ResponseWriter, r *http.Request) {
@@ -765,6 +809,7 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 	query := "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)"
 	db.Exec(query, postID, me.ID, r.FormValue("comment"))
 
+	renderIndexPosts()
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
@@ -821,6 +866,7 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 		db.Exec(query, 1, id)
 	}
 
+	renderIndexPosts()
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
@@ -863,6 +909,15 @@ func main() {
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(8)
 	defer db.Close()
+
+	for {
+		if db.Ping() == nil {
+			break
+		}
+		log.Println("waiting db...")
+	}
+
+	renderIndexPosts()
 
 	go http.ListenAndServe(":3000", nil)
 
