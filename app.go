@@ -196,22 +196,27 @@ func makePosts(results []Post, CSRFToken string, allComments bool) ([]Post, erro
 			return nil, err
 		}
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
+		query := ("SELECT comments.id, comments.comment, comments.created_at, users.id, users.account_name " +
+			" FROM `comments` INNER JOIN users ON comments.user_id = users.id " +
+			" WHERE `post_id` = ? ORDER BY comments.`created_at` DESC")
 		if !allComments {
 			query += " LIMIT 3"
 		}
 		var comments []Comment
-		cerr := db.Select(&comments, query, p.ID)
-		if cerr != nil {
-			return nil, cerr
-		}
 
-		for i := 0; i < len(comments); i++ {
-			uerr := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if uerr != nil {
-				return nil, uerr
-			}
+		rows, err := db.Query(query, p.ID)
+		if err != nil {
+			log.Panic(err)
 		}
+		for rows.Next() {
+			var c Comment
+			err := rows.Scan(&c.ID, &c.Comment, &c.CreatedAt, &c.User.ID, &c.User.AccountName)
+			if err != nil {
+				log.Println(err)
+			}
+			comments = append(comments, c)
+		}
+		rows.Close()
 
 		// reverse
 		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
