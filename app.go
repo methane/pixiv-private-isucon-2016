@@ -32,7 +32,7 @@ import (
 
 var (
 	db    *sqlx.DB
-	store *gsm.MemcacheStore
+	store sessions.Store
 )
 
 const (
@@ -153,7 +153,6 @@ func calculatePasshash(accountName, password string) string {
 
 func getSession(r *http.Request) *sessions.Session {
 	session, _ := store.Get(r, "isuconp-go.session")
-
 	return session
 }
 
@@ -165,12 +164,10 @@ func getSessionUser(r *http.Request) User {
 	}
 
 	u := User{}
-
 	err := db.Get(&u, "SELECT * FROM `users` WHERE `id` = ?", uid)
 	if err != nil {
 		return User{}
 	}
-
 	return u
 }
 
@@ -187,59 +184,78 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	}
 }
 
+var (
+	commentM     sync.Mutex
+	commentStore map[int][]Comment = make(map[int][]Comment)
+)
+
+func getCommentsLocked(postID int) []Comment {
+	if cs, ok := commentStore[postID]; ok {
+		return cs
+	}
+
+	var cs []Comment
+	query := ("SELECT comments.id, comments.comment, comments.created_at, users.id, users.account_name " +
+		" FROM `comments` INNER JOIN users ON comments.user_id = users.id " +
+		" WHERE `post_id` = ? ORDER BY comments.`created_at`")
+
+	rows, err := db.Query(query, postID)
+	if err != nil {
+		log.Println(err)
+		return cs
+	}
+	for rows.Next() {
+		var c Comment
+		err := rows.Scan(&c.ID, &c.Comment, &c.CreatedAt, &c.User.ID, &c.User.AccountName)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		cs = append(cs, c)
+	}
+	rows.Close()
+
+	commentStore[postID] = cs
+	return cs
+}
+
+func getComments(postID int) []Comment {
+	commentM.Lock()
+	defer commentM.Unlock()
+	return getCommentsLocked(postID)
+}
+
+func appendComent(c Comment) {
+	commentM.Lock()
+	cs := getCommentsLocked(c.PostID)
+	commentStore[c.PostID] = append(cs, c)
+	commentM.Unlock()
+}
+
 func makePosts(results []Post, CSRFToken string, allComments bool) ([]Post, error) {
 	var posts []Post
 
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
+		comments := getComments(p.ID)
+		if !allComments && len(comments) > 3 {
+			comments = comments[len(comments)-3:]
 		}
-
-		query := ("SELECT comments.id, comments.comment, comments.created_at, users.id, users.account_name " +
-			" FROM `comments` INNER JOIN users ON comments.user_id = users.id " +
-			" WHERE `post_id` = ? ORDER BY comments.`created_at` DESC")
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-
-		rows, err := db.Query(query, p.ID)
-		if err != nil {
-			log.Panic(err)
-		}
-		for rows.Next() {
-			var c Comment
-			err := rows.Scan(&c.ID, &c.Comment, &c.CreatedAt, &c.User.ID, &c.User.AccountName)
-			if err != nil {
-				log.Println(err)
-			}
-			comments = append(comments, c)
-		}
-		rows.Close()
-
-		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
-		}
-
 		p.Comments = comments
+		p.CSRFToken = CSRFToken
 
 		perr := db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
 		if perr != nil {
 			return nil, perr
 		}
 
-		p.CSRFToken = CSRFToken
-
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
+		if p.User.DelFlg != 0 {
+			continue
 		}
+		posts = append(posts, p)
 		if len(posts) >= postsPerPage {
 			break
 		}
 	}
-
 	return posts, nil
 }
 
@@ -511,7 +527,6 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-
 	rerr := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
 	if rerr != nil {
 		fmt.Println(rerr)
@@ -532,12 +547,10 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	}
 
 	postIDs := []int{}
-	perr := db.Select(&postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
-	if perr != nil {
-		fmt.Println(perr)
-		return
+	for _, r := range results {
+		postIDs = append(postIDs, r.ID)
 	}
-	postCount := len(postIDs)
+	postCount := len(results)
 
 	commentedCount := 0
 	if postCount > 0 {
@@ -811,9 +824,24 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)"
-	db.Exec(query, postID, me.ID, r.FormValue("comment"))
-
+	now := time.Now()
+	commentStr := r.FormValue("comment")
+	query := "INSERT INTO `comments` (`post_id`, `user_id`, `comment`, `created_at`) VALUES (?,?,?,?)"
+	res, err := db.Exec(query, postID, me.ID, commentStr, now)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	lid, _ := res.LastInsertId()
+	c := Comment{
+		ID:        int(lid),
+		PostID:    postID,
+		UserID:    me.ID,
+		Comment:   commentStr,
+		CreatedAt: now,
+		User:      me,
+	}
+	appendComent(c)
 	renderIndexPosts()
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
