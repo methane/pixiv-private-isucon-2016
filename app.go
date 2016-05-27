@@ -953,6 +953,7 @@ func main() {
 
 	go http.ListenAndServe(":3000", nil)
 
+	goji.DefaultMux = web.New()
 	goji.Get("/initialize", getInitialize)
 	goji.Get("/login", getLogin)
 	goji.Post("/login", postLogin)
