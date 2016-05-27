@@ -432,8 +432,9 @@ func getLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	indexTemplate *template.Template
-	postsTemplate *template.Template
+	indexTemplate       *template.Template
+	postsTemplate       *template.Template
+	accountNameTempalte *template.Template
 
 	indexPostsM         sync.Mutex
 	indexPostsT         time.Time
@@ -452,6 +453,13 @@ func init() {
 	))
 
 	postsTemplate = template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
+		getTemplPath("posts.html"),
+		getTemplPath("post.html"),
+	))
+
+	accountNameTempalte = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("user.html"),
 		getTemplPath("posts.html"),
 		getTemplPath("post.html"),
 	))
@@ -575,16 +583,7 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("user.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	accountNameTempalte.Execute(w, struct {
 		Posts          []Post
 		User           User
 		PostCount      int
