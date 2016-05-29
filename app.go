@@ -685,6 +685,7 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 var uploadM sync.Mutex
 
 func postIndex(w http.ResponseWriter, r *http.Request) {
+	time.Sleep(time.Millisecond * 200)
 	me := getSessionUser(r)
 	if !isLogin(me) {
 		http.Redirect(w, r, "/login", http.StatusFound)
