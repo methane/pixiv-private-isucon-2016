@@ -1,0 +1,37 @@
+{% func PrintPost(p *Post) %}
+<div class="isu-post" id="pid_{%d p.ID %}" data-created-at="{%s p.CreatedAt.Format("2006-01-02T15:04:05-07:00") %}">
+  <div class="isu-post-header">
+    <a href="/@{%s p.User.AccountName %} " class="isu-post-account-name">{%s p.User.AccountName %}</a>
+    <a href="/posts/{%d p.ID %}" class="isu-post-permalink">
+      <time class="timeago" datetime="{%s p.CreatedAt.Format("2006-01-02T15:04:05-07:00") %}"></time>
+    </a>
+  </div>
+  <div class="isu-post-image">
+    <img src="{%s imageURL(p) %}" class="isu-image">
+  </div>
+  <div class="isu-post-text">
+    <a href="/@{%s p.User.AccountName %}" class="isu-post-account-name">{%s p.User.AccountName %}</a>
+    {%s p.Body %}
+  </div>
+  <div class="isu-post-comment">
+    <div class="isu-post-comment-count">
+      comments: <b>{%d p.CommentCount %}</b>
+    </div>
+
+    {% for _, c := range p.Comments %}
+    <div class="isu-comment">
+      <a href="/@{%s c.User.AccountName %}" class="isu-comment-account-name">{%s c.User.AccountName %}</a>
+      <span class="isu-comment-text">{%s c.Comment %}</span>
+    </div>
+    {% endfor %}
+    <div class="isu-comment-form">
+      <form method="post" action="/comment">
+        <input type="text" name="comment">
+        <input type="hidden" name="post_id" value="{%d p.ID %}">
+        <input type="hidden" name="csrf_token" value="{%s p.CSRFToken %}">
+        <input type="submit" name="submit" value="submit">
+      </form>
+    </div>
+  </div>
+</div>
+{% endfunc %}

@@ -107,11 +107,10 @@ func dbInitialize() {
 		"UPDATE users SET del_flg = 0",
 		"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
 	}
-
 	for _, sql := range sqls {
 		db.Exec(sql)
 	}
-
+	usersReset()
 	renderIndexPosts()
 }
 
@@ -161,13 +160,8 @@ func getSessionUser(r *http.Request) User {
 	if session.UserId == 0 {
 		return User{}
 	}
-	u := User{}
-	err := db.Get(&u, "SELECT * FROM `users` WHERE `id` = ?", session.UserId)
-	if err != nil {
-		log.Printf("failed to get session user: %v", err)
-	}
-	session.User = u
-	return u
+	session.User = userGet(session.UserId)
+	return session.User
 }
 
 func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
@@ -239,16 +233,11 @@ func makePosts(results []Post, CSRFToken string, allComments bool) ([]Post, erro
 		p.Comments = comments
 		p.CSRFToken = CSRFToken
 
-		if p.User.AccountName == "" {
-			perr := db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-			if perr != nil {
-				return nil, perr
-			}
-		}
-
-		if p.User.DelFlg != 0 {
+		p.User = userGet(p.UserID)
+		if p.User.DelFlg == 1 {
 			continue
 		}
+
 		posts = append(posts, p)
 		if len(posts) >= postsPerPage {
 			break
@@ -393,7 +382,8 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := "INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)"
-	result, eerr := db.Exec(query, accountName, calculatePasshash(accountName, password))
+	passhash := calculatePasshash(accountName, password)
+	result, eerr := db.Exec(query, accountName, passhash)
 	if eerr != nil {
 		fmt.Println(eerr.Error())
 		return
@@ -408,6 +398,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	session.UserId = int(uid)
 	session.CsrfToken = csrfToken
 	session.Save(r, w)
+	userAdd(User{ID: int(uid), AccountName: accountName, CreatedAt: time.Now(), Passhash: passhash})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -483,7 +474,7 @@ func renderIndexPosts() {
 	now = time.Now()
 
 	results := []Post{}
-	err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` INNER JOIN `users` ON posts.user_id=users.id WHERE users.del_flg = 0 ORDER BY `created_at` DESC LIMIT 20")
+	err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT 40")
 	if err != nil {
 		log.Println(err)
 		return
@@ -518,15 +509,10 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 	sess := getSession(r)
 	me := sess.User
 	if me.AccountName == "" && sess.UserId != 0 {
-		err := db.Get(&me, "SELECT * FROM `users` WHERE `id` = ?", sess.UserId)
-		if err != nil {
-			log.Printf("failed to get session user: %v", err)
-		}
+		me = userGet(sess.UserId)
 		sess.User = me
 	}
-
 	posts := getIndexPosts()
-
 	indexTemplate.Execute(w,
 		map[string]interface{}{
 			"Me":        me,
@@ -631,23 +617,13 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	rows, err := db.Query("SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at`, users.account_name FROM `posts` INNER JOIN `users` ON posts.user_id=users.id WHERE users.del_flg = 0 AND posts.`created_at` <= ? ORDER BY `created_at` DESC LIMIT 20", t)
+	err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` WHERE posts.`created_at` <= ? ORDER BY `created_at` DESC LIMIT 40", t)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	for rows.Next() {
-		var p Post
-		err := rows.Scan(&p.ID, &p.UserID, &p.Body, &p.Mime, &p.CreatedAt, &p.User.AccountName)
-		if err != nil {
-			log.Println(err)
-		}
-		p.User.ID = p.UserID
-		results = append(results, p)
-	}
-	rows.Close()
 
-	posts, merr := makePosts(results, getCSRFToken(r), false)
+	posts, merr := makePosts(results, csrfToken, false)
 	if merr != nil {
 		fmt.Println(merr)
 		return
@@ -664,7 +640,6 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 
 	template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
 		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
 	)).Execute(w, posts)
 }
 
@@ -915,6 +890,10 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	for _, id := range r.Form["uid[]"] {
 		db.Exec(query, 1, id)
+		iid, err := strconv.Atoi(id)
+		if err != nil {
+			userBan(iid, 1)
+		}
 	}
 
 	time.Sleep(time.Millisecond * 200)
@@ -969,6 +948,7 @@ func main() {
 		log.Println("waiting db...")
 	}
 
+	usersReset()
 	renderIndexPosts()
 
 	go http.ListenAndServe(":3000", nil)
@@ -1054,4 +1034,45 @@ func (self *SessionStore) Set(w http.ResponseWriter, sess *Session) {
 	self.Lock()
 	self.store[key] = sess
 	self.Unlock()
+}
+
+var (
+	userRepoM sync.Mutex
+	userRepo  map[int]User
+)
+
+func userAdd(u User) {
+	userRepoM.Lock()
+	userRepo[u.ID] = u
+	userRepoM.Unlock()
+}
+
+func userGet(uid int) User {
+	userRepoM.Lock()
+	u := userRepo[uid]
+	userRepoM.Unlock()
+	return u
+}
+
+func userBan(uid, ban int) {
+	userRepoM.Lock()
+	u := userRepo[uid]
+	u.DelFlg = ban
+	userRepo[uid] = u
+	userRepoM.Unlock()
+}
+
+func usersReset() {
+	userRepoM.Lock()
+	defer userRepoM.Unlock()
+
+	userRepo = make(map[int]User)
+	users := []User{}
+	err := db.Select(&users, "SELECT * FROM users")
+	if err != nil {
+		panic(err)
+	}
+	for _, u := range users {
+		userRepo[u.ID] = u
+	}
 }
