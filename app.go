@@ -677,7 +677,6 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 var uploadM sync.Mutex
 
 func postIndex(w http.ResponseWriter, r *http.Request) {
-	time.Sleep(time.Millisecond * 200)
 	me := getSessionUser(r)
 	if !isLogin(me) {
 		http.Redirect(w, r, "/login", http.StatusFound)
@@ -760,6 +759,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	tf.Close()
 	copyImage(int(pid), tf.Name(), mime)
 
+	time.Sleep(time.Millisecond * 200)
 	renderIndexPosts()
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
@@ -832,6 +832,7 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		User:      me,
 	}
 	appendComent(c)
+	time.Sleep(time.Millisecond * 200)
 	renderIndexPosts()
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
@@ -889,6 +890,7 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 		db.Exec(query, 1, id)
 	}
 
+	time.Sleep(time.Millisecond * 200)
 	renderIndexPosts()
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
