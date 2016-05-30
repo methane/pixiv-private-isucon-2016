@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
@@ -21,8 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
-	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
@@ -31,8 +30,7 @@ import (
 )
 
 var (
-	db    *sqlx.DB
-	store sessions.Store
+	db *sqlx.DB
 )
 
 const (
@@ -73,11 +71,6 @@ type Comment struct {
 	Comment   string    `db:"comment"`
 	CreatedAt time.Time `db:"created_at"`
 	User      User
-}
-
-func init() {
-	memcacheClient := memcache.New("localhost:11211")
-	store = gsm.NewMemcacheStore(memcacheClient, "isucogram_", []byte("sendagaya"))
 }
 
 func writeImage(id int, mime string, data []byte) {
@@ -151,37 +144,32 @@ func calculatePasshash(accountName, password string) string {
 	return digest(password + ":" + calculateSalt(accountName))
 }
 
-func getSession(r *http.Request) *sessions.Session {
-	session, _ := store.Get(r, "isuconp-go.session")
-	return session
+func getSession(r *http.Request) *Session {
+	return sessionStore.Get(r)
 }
 
 func getSessionUser(r *http.Request) User {
 	session := getSession(r)
-	uid, ok := session.Values["user_id"]
-	if !ok || uid == nil {
+	if session.UserId == 0 {
 		return User{}
 	}
-
 	u := User{}
-	err := db.Get(&u, "SELECT * FROM `users` WHERE `id` = ?", uid)
+	err := db.Get(&u, "SELECT * FROM `users` WHERE `id` = ?", session.UserId)
 	if err != nil {
-		return User{}
+		log.Printf("failed to get session user: %v", err)
 	}
+	session.User = u
 	return u
 }
 
 func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	session := getSession(r)
-	value, ok := session.Values[key]
-
-	if !ok || value == nil {
-		return ""
-	} else {
-		delete(session.Values, key)
-		session.Save(r, w)
-		return value.(string)
+	value := session.Notice
+	if value != "" {
+		session.Notice = ""
+		sessionStore.Set(w, session)
 	}
+	return value
 }
 
 var (
@@ -291,11 +279,7 @@ func isLogin(u User) bool {
 
 func getCSRFToken(r *http.Request) string {
 	session := getSession(r)
-	csrfToken, ok := session.Values["csrf_token"]
-	if !ok {
-		return ""
-	}
-	return csrfToken.(string)
+	return session.CsrfToken
 }
 
 func secureRandomStr(b int) string {
@@ -339,19 +323,15 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := tryLogin(r.FormValue("account_name"), r.FormValue("password"))
-
+	session := getSession(r)
 	if u != nil {
-		session := getSession(r)
-		session.Values["user_id"] = u.ID
-		session.Values["csrf_token"] = secureRandomStr(16)
+		session.UserId = u.ID
+		session.CsrfToken = secureRandomStr(16)
 		session.Save(r, w)
-
 		http.Redirect(w, r, "/", http.StatusFound)
 	} else {
-		session := getSession(r)
-		session.Values["notice"] = "アカウント名かパスワードが間違っています"
+		session.Notice = "アカウント名かパスワードが間違っています"
 		session.Save(r, w)
-
 		http.Redirect(w, r, "/login", http.StatusFound)
 	}
 }
@@ -382,9 +362,8 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	validated := validateUser(accountName, password)
 	if !validated {
 		session := getSession(r)
-		session.Values["notice"] = "アカウント名は3文字以上、パスワードは6文字以上である必要があります"
+		session.Notice = "アカウント名は3文字以上、パスワードは6文字以上である必要があります"
 		session.Save(r, w)
-
 		http.Redirect(w, r, "/register", http.StatusFound)
 		return
 	}
@@ -395,9 +374,8 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 
 	if exists == 1 {
 		session := getSession(r)
-		session.Values["notice"] = "アカウント名がすでに使われています"
+		session.Notice = "アカウント名がすでに使われています"
 		session.Save(r, w)
-
 		http.Redirect(w, r, "/register", http.StatusFound)
 		return
 	}
@@ -415,19 +393,17 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(lerr.Error())
 		return
 	}
-	session.Values["user_id"] = uid
-	session.Values["csrf_token"] = secureRandomStr(16)
+	session.UserId = int(uid)
+	session.CsrfToken = secureRandomStr(16)
 	session.Save(r, w)
-
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func getLogout(w http.ResponseWriter, r *http.Request) {
 	session := getSession(r)
-	delete(session.Values, "user_id")
-	session.Options = &sessions.Options{MaxAge: -1}
+	session.UserId = 0
+	session.User = User{}
 	session.Save(r, w)
-
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -703,9 +679,8 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	file, header, ferr := r.FormFile("file")
 	if ferr != nil {
 		session := getSession(r)
-		session.Values["notice"] = "画像が必須です"
+		session.Notice = "画像が必須です"
 		session.Save(r, w)
-
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
@@ -723,9 +698,8 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 			mime = "image/gif"
 		} else {
 			session := getSession(r)
-			session.Values["notice"] = "投稿できる画像形式はjpgとpngとgifだけです"
+			session.Notice = "投稿できる画像形式はjpgとpngとgifだけです"
 			session.Save(r, w)
-
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
@@ -743,7 +717,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		os.Remove(tf.Name())
 		tf.Close()
 		session := getSession(r)
-		session.Values["notice"] = "ファイルサイズが大きすぎます"
+		session.Notice = "ファイルサイズが大きすぎます"
 		session.Save(r, w)
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
@@ -972,4 +946,59 @@ func main() {
 	goji.Post("/admin/banned", postAdminBanned)
 	goji.Get("/*", http.FileServer(http.Dir("../public")))
 	goji.Serve()
+}
+
+const sessionName = "isucon_session"
+
+type Session struct {
+	UserId    int
+	User      User
+	Key       string
+	Notice    string
+	CsrfToken string
+}
+
+func (s *Session) Save(r *http.Request, w http.ResponseWriter) {
+	sessionStore.Set(w, s)
+}
+
+type SessionStore struct {
+	sync.Mutex
+	store map[string]*Session
+}
+
+var sessionStore = SessionStore{
+	store: make(map[string]*Session),
+}
+
+func (self *SessionStore) Get(r *http.Request) *Session {
+	cookie, _ := r.Cookie(sessionName)
+	if cookie == nil {
+		return &Session{}
+	}
+	key := cookie.Value
+	self.Lock()
+	s := self.store[key]
+	self.Unlock()
+	if s == nil {
+		s = &Session{}
+	}
+	return s
+}
+
+func (self *SessionStore) Set(w http.ResponseWriter, sess *Session) {
+	key := sess.Key
+	if key == "" {
+		b := make([]byte, 8)
+		rand.Read(b)
+		key = hex.EncodeToString(b)
+		sess.Key = key
+	}
+
+	cookie := sessions.NewCookie(sessionName, key, &sessions.Options{})
+	http.SetCookie(w, cookie)
+
+	self.Lock()
+	self.store[key] = sess
+	self.Unlock()
 }
