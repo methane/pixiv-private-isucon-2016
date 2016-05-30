@@ -5,12 +5,14 @@ import (
 	crand "crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
@@ -26,6 +28,7 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	"github.com/zenazn/goji"
+	"github.com/zenazn/goji/bind"
 	"github.com/zenazn/goji/web"
 )
 
@@ -34,6 +37,7 @@ var (
 )
 
 const (
+	csrfToken      = "DEADBEEF"
 	postsPerPage   = 20
 	ISO8601_FORMAT = "2006-01-02T15:04:05-07:00"
 	UploadLimit    = 10 * 1024 * 1024 // 10mb
@@ -301,19 +305,21 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 
 func getLogin(w http.ResponseWriter, r *http.Request) {
 	me := getSessionUser(r)
-
 	if isLogin(me) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("login.html")),
-	).Execute(w, struct {
-		Me    User
-		Flash string
-	}{me, getFlash(w, r, "notice")})
+	sess := getSession(r)
+	if sess.Notice == "" {
+		w.Write(loginHTML)
+		return
+	}
+
+	loginTemplate.Execute(w, map[string]interface{}{
+		"Me":    me,
+		"Flash": sess.Notice,
+	})
 }
 
 func postLogin(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +332,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	session := getSession(r)
 	if u != nil {
 		session.UserId = u.ID
-		session.CsrfToken = secureRandomStr(16)
+		session.CsrfToken = csrfToken
 		session.Save(r, w)
 		http.Redirect(w, r, "/", http.StatusFound)
 	} else {
@@ -394,7 +400,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.UserId = int(uid)
-	session.CsrfToken = secureRandomStr(16)
+	session.CsrfToken = csrfToken
 	session.Save(r, w)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -411,11 +417,14 @@ var (
 	indexTemplate       *template.Template
 	postsTemplate       *template.Template
 	accountNameTempalte *template.Template
+	loginTemplate       *template.Template
+	loginHTML           []byte
+	postIDTemplate      *template.Template
 
 	indexPostsM         sync.Mutex
 	indexPostsT         time.Time
 	indexPostsRenderedM sync.RWMutex
-	indexPostsRendered  []byte
+	indexPostsRendered  template.HTML
 )
 
 func init() {
@@ -439,6 +448,23 @@ func init() {
 		getTemplPath("posts.html"),
 		getTemplPath("post.html"),
 	))
+
+	loginTemplate = template.Must(template.ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("login.html")),
+	)
+	me := User{}
+	var buf bytes.Buffer
+	loginTemplate.Execute(&buf, struct {
+		Me    User
+		Flash string
+	}{me, ""})
+	loginHTML = buf.Bytes()
+
+	postIDTemplate = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("post_id.html"),
+		getTemplPath("post.html")))
 }
 
 func renderIndexPosts() {
@@ -457,7 +483,7 @@ func renderIndexPosts() {
 		return
 	}
 
-	posts, merr := makePosts(results, "[[[CSRFTOKEN]]]", false)
+	posts, merr := makePosts(results, csrfToken, false)
 	if merr != nil {
 		log.Println(merr)
 		return
@@ -471,21 +497,21 @@ func renderIndexPosts() {
 
 	indexPostsT = now
 	indexPostsRenderedM.Lock()
-	indexPostsRendered = b.Bytes()
+	indexPostsRendered = template.HTML(b.String())
 	indexPostsRenderedM.Unlock()
 }
 
-func getIndexPosts(csrf string) template.HTML {
+func getIndexPosts() template.HTML {
 	indexPostsRenderedM.RLock()
-	t := bytes.Replace(indexPostsRendered, []byte("[[[CSRFTOKEN]]]"), []byte(csrf), -1)
+	t := indexPostsRendered
 	indexPostsRenderedM.RUnlock()
-	return template.HTML(string(t))
+	return t
 }
 
 func getIndex(w http.ResponseWriter, r *http.Request) {
 	me := getSessionUser(r)
 	csrf := getCSRFToken(r)
-	posts := getIndexPosts(csrf)
+	posts := getIndexPosts()
 
 	indexTemplate.Execute(w,
 		map[string]interface{}{
@@ -631,7 +657,8 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	posts, merr := makePosts(results, getCSRFToken(r), true)
 	if merr != nil {
-		fmt.Println(merr)
+		log.Println(merr)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -639,20 +666,9 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-
 	p := posts[0]
-
 	me := getSessionUser(r)
-
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("post_id.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	postIDTemplate.Execute(w, struct {
 		Post Post
 		Me   User
 	}{p, me})
@@ -945,7 +961,15 @@ func main() {
 	goji.Get("/admin/banned", getAdminBanned)
 	goji.Post("/admin/banned", postAdminBanned)
 	goji.Get("/*", http.FileServer(http.Dir("../public")))
-	goji.Serve()
+
+	if !flag.Parsed() {
+		flag.Parse()
+	}
+	listener := bind.Default()
+	if ul, ok := listener.(*net.UnixListener); ok {
+		os.Chmod(ul.Addr().String(), 0777)
+	}
+	goji.ServeListener(listener)
 }
 
 const sessionName = "isucon_session"
