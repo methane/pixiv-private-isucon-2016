@@ -68,6 +68,10 @@ type Post struct {
 	CSRFToken    string
 }
 
+func (p *Post) Render() template.HTML {
+	return template.HTML(PrintPost(p))
+}
+
 type Comment struct {
 	ID        int       `db:"id"`
 	PostID    int       `db:"post_id"`
@@ -235,9 +239,11 @@ func makePosts(results []Post, CSRFToken string, allComments bool) ([]Post, erro
 		p.Comments = comments
 		p.CSRFToken = CSRFToken
 
-		perr := db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if perr != nil {
-			return nil, perr
+		if p.User.AccountName == "" {
+			perr := db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
+			if perr != nil {
+				return nil, perr
+			}
 		}
 
 		if p.User.DelFlg != 0 {
@@ -251,7 +257,7 @@ func makePosts(results []Post, CSRFToken string, allComments bool) ([]Post, erro
 	return posts, nil
 }
 
-func imageURL(p Post) string {
+func imageURL(p *Post) string {
 	ext := ""
 	if p.Mime == "image/jpeg" {
 		ext = ".jpg"
@@ -509,14 +515,22 @@ func getIndexPosts() template.HTML {
 }
 
 func getIndex(w http.ResponseWriter, r *http.Request) {
-	me := getSessionUser(r)
-	csrf := getCSRFToken(r)
+	sess := getSession(r)
+	me := sess.User
+	if me.AccountName == "" && sess.UserId != 0 {
+		err := db.Get(&me, "SELECT * FROM `users` WHERE `id` = ?", sess.UserId)
+		if err != nil {
+			log.Printf("failed to get session user: %v", err)
+		}
+		sess.User = me
+	}
+
 	posts := getIndexPosts()
 
 	indexTemplate.Execute(w,
 		map[string]interface{}{
 			"Me":        me,
-			"CSRFToken": csrf,
+			"CSRFToken": csrfToken,
 			"Flash":     getFlash(w, r, "notice"),
 			"Posts":     posts},
 	)
@@ -541,6 +555,9 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	if rerr != nil {
 		fmt.Println(rerr)
 		return
+	}
+	for i := 0; i < len(results); i++ {
+		results[i].User = user
 	}
 
 	posts, merr := makePosts(results, getCSRFToken(r), false)
@@ -614,11 +631,21 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	rerr := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` INNER JOIN `users` ON posts.user_id=users.id WHERE users.del_flg = 0 AND posts.`created_at` <= ? ORDER BY `created_at` DESC LIMIT 20", t.Format(ISO8601_FORMAT))
-	if rerr != nil {
-		fmt.Println(rerr)
+	rows, err := db.Query("SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at`, users.account_name FROM `posts` INNER JOIN `users` ON posts.user_id=users.id WHERE users.del_flg = 0 AND posts.`created_at` <= ? ORDER BY `created_at` DESC LIMIT 20", t)
+	if err != nil {
+		fmt.Println(err)
 		return
 	}
+	for rows.Next() {
+		var p Post
+		err := rows.Scan(&p.ID, &p.UserID, &p.Body, &p.Mime, &p.CreatedAt, &p.User.AccountName)
+		if err != nil {
+			log.Println(err)
+		}
+		p.User.ID = p.UserID
+		results = append(results, p)
+	}
+	rows.Close()
 
 	posts, merr := makePosts(results, getCSRFToken(r), false)
 	if merr != nil {
@@ -669,9 +696,9 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 	p := posts[0]
 	me := getSessionUser(r)
 	postIDTemplate.Execute(w, struct {
-		Post Post
+		Post *Post
 		Me   User
-	}{p, me})
+	}{&p, me})
 }
 
 var uploadM sync.Mutex

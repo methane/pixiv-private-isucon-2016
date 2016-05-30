@@ -1,5 +1,7 @@
 all:
-	go build -o app
+	cd main && qtc
+	mv main/*.go .
+	go build -o app *.go
 
 setup:
 	go get -u .
